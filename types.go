@@ -1,7 +1,5 @@
 package main
 
-type CompareType string
-
 type BenchmarkConfiguration struct {
 	Benchtime string  `yaml:"benchtime"`
 	Threshold float64 `yaml:"threshold"`
@@ -21,5 +19,5 @@ type Benchmark struct {
 type BenchmarkList struct {
 	BenchmarkConfiguration `yaml:",inline"`
 	Command                string      `yaml:"command"`
-	Benchmarks             []Benchmark `yaml:benchmarks"`
+	Benchmarks             []Benchmark `yaml:"benchmarks"`
 }

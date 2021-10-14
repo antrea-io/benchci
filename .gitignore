@@ -2,3 +2,7 @@ bin
 
 # Emacs save files
 *~
+dist/
+
+.idea/
+vendor/
