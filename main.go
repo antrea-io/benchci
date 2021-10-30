@@ -112,6 +112,7 @@ func versionRequired(required, tag string) bool {
 	if required == "" {
 		return true
 	}
+	required = strings.TrimSpace(required)
 	tagVer, _ := semver.Make(trimTagVersion(tag))
 
 	if strings.HasPrefix(required, ">=") {
@@ -126,30 +127,30 @@ func versionRequired(required, tag string) bool {
 	return tagVer.Equals(requiredVer)
 }
 
-func runBenchmarks(tagVersion string, isTag bool) (Set, error) {
+func runBenchmarks(tagVersion string) (Set, error) {
 	set := Set{}
 	for i, benchmark := range benchmarks.Benchmarks {
-		if isTag && !versionRequired(benchmark.VersionRequirement, tagVersion) {
+		if tagVersion != "" && !versionRequired(benchmark.VersionRequirement, tagVersion) {
 			klog.InfoS("Version required, skip test", "tagVersion", tagVersion, "versionRequirement", benchmark.VersionRequirement)
 			continue
 		}
 		parseSet, err := runBenchmark(benchmarks.Command, &benchmarks.Benchmarks[i])
-		klog.InfoS("Parse result", "parseSet", parseSet)
 		if err != nil {
-			return nil, err
-		}
-		if len(parseSet) == 0 {
+			klog.InfoS("Parse result error", "parseSet", parseSet)
 			continue
 		}
 		if len(parseSet) != 1 {
-			return nil, fmt.Errorf("expected exactly one benchmark result")
+			klog.InfoS("expected exactly one benchmark result", "got", parseSet)
+			continue
 		}
 		if _, ok := set[benchmark.UniqueName]; ok {
-			return nil, fmt.Errorf("more than one benchmark with unique name '%s'", benchmark.UniqueName)
+			klog.InfoS("more than one benchmark with unique name", "Name", benchmark.UniqueName)
+			continue
 		}
-		for _, s := range parseSet {
+		for name, s := range parseSet {
 			if len(s) != 1 {
-				return nil, fmt.Errorf("expected exactly one benchmark result")
+				klog.InfoS("expected exactly one benchmark result", "Name", name, "benchmark.UniqueName", benchmark.UniqueName)
+				continue
 			}
 			set[benchmark.UniqueName] = s[0]
 		}
@@ -177,7 +178,7 @@ func getLatestRelease(repository *git.Repository) (prevVersionTag *plumbing.Refe
 		tagName := tagRef.Name().Short()
 		v, err := semver.Make(trimTagVersion(tagName))
 		if err != nil {
-			klog.ErrorS(err, "Tag name is a not a valid semver, skipping", "tag", tagName)
+			klog.InfoS("Tag name is a not a valid semver, skipping", "tag", tagName, "err", err)
 		}
 		tags = append(tags, SemverTag{tagRef, v})
 		return nil
@@ -187,6 +188,9 @@ func getLatestRelease(repository *git.Repository) (prevVersionTag *plumbing.Refe
 		t2 := &tags[j]
 		return t1.Version.GT(t2.Version)
 	})
+	if len(tags) == 0 {
+		return prevVersionTag, fmt.Errorf("version tags not found in repository")
+	}
 	prevVersionTag = tags[0].Ref
 	klog.InfoS("Latest tag version", "tag", prevVersionTag)
 	return
@@ -233,7 +237,11 @@ func run() error {
 		}
 
 		klog.InfoS("Run Benchmark", "commitHash", commit, "Ref", ref)
-		benchSet, err = runBenchmarks(ref, isTag)
+		var tagVersion string
+		if isTag {
+			tagVersion = ref
+		}
+		benchSet, err = runBenchmarks(tagVersion)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run a benchmark: %w", err)
 		}
@@ -263,7 +271,7 @@ func run() error {
 		tagName = prevVersionTag.Name().String()
 		latestReleaseSet, err = resetAndRunBenchmark(prevVersionTag.Hash(), prevVersionTag.Name().Short(), true)
 		if err != nil {
-			klog.ErrorS(err, "Failed to run a benchmark")
+			return err
 		}
 	}
 
@@ -339,7 +347,8 @@ func run() error {
 		regressionWithLatestVersion = showRatio(os.Stdout, ratiosWithRelease, onlyRegression, tagName)
 	}
 	if regression || regressionWithLatestVersion {
-		return fmt.Errorf("this commit makes benchmarks worse")
+		return fmt.Errorf("this commit makes benchmarks worse，compared with %s: %t, compared with %s: %t",
+			baseRef, regression, tagName, regressionWithLatestVersion)
 	}
 
 	return nil
@@ -440,9 +449,6 @@ func showRatio(w io.Writer, results []result, onlyRegression bool, compareWith s
 
 		table.Render()
 		fmt.Fprintln(w)
-	}
-	if regression {
-		klog.ErrorS(nil, "This commit has worse benchmark results", "referenceVersion", compareWith)
 	}
 	return regression
 }

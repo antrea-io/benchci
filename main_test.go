@@ -10,55 +10,55 @@ func TestVersionCompare(t *testing.T) {
 	testCases := []struct {
 		versionRequirement string
 		version            string
-		expectResult       bool
+		expectedResult     bool
 	}{
 		{
 			versionRequirement: ">=1.9.0",
 			version:            "1.10.0",
-			expectResult:       true,
+			expectedResult:     true,
 		},
 		{
 			versionRequirement: ">=1.3.0",
 			version:            "1.3.0",
-			expectResult:       true,
+			expectedResult:     true,
 		},
 		{
-			versionRequirement: ">=1.3.0",
+			versionRequirement: "  >=1.3.0",
 			version:            "1.2.0",
-			expectResult:       false,
+			expectedResult:     false,
 		},
 		{
-			versionRequirement: ">v1.3.0",
+			versionRequirement: ">v1.3.0   ",
 			version:            "v1.4.0",
-			expectResult:       true,
+			expectedResult:     true,
 		},
 		{
 			versionRequirement: ">1.3.0",
-			version:            "v1.3.0",
-			expectResult:       false,
+			version:            " v1.3.0",
+			expectedResult:     false,
 		},
 		{
 			versionRequirement: ">v1.3.0",
-			version:            "1.2.0",
-			expectResult:       false,
+			version:            " 1.2.0",
+			expectedResult:     false,
 		},
 		{
-			versionRequirement: "1.3.0",
+			versionRequirement: "1.3.0 ",
 			version:            "1.2.0",
-			expectResult:       false,
+			expectedResult:     false,
 		},
 		{
-			versionRequirement: "1.3.0",
+			versionRequirement: " 1.3.0",
 			version:            "1.3.0",
-			expectResult:       true,
+			expectedResult:     true,
 		},
 		{
 			versionRequirement: "",
 			version:            "1.3.0",
-			expectResult:       true,
+			expectedResult:     true,
 		},
 	}
 	for _, tCase := range testCases {
-		assert.Equal(t, tCase.expectResult, versionRequired(tCase.versionRequirement, tCase.version), "version check result not match")
+		assert.Equal(t, tCase.expectedResult, versionRequired(tCase.versionRequirement, tCase.version), "version check result not match")
 	}
 }

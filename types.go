@@ -1,19 +1,19 @@
 package main
 
 type BenchmarkConfiguration struct {
-	Benchtime          string  `yaml:"benchtime"`
-	Threshold          float64 `yaml:"threshold"`
-	Compare            string  `yaml:"compare"`
-	Cpu                string  `yaml:"cpu"`
-	Timeout            string  `yaml:"timeout"`
-	Benchmem           *bool   `yaml:"benchmem,omitempty"`
-	VersionRequirement string  `yaml:"version_requirement"`
+	Benchtime string  `yaml:"benchtime"`
+	Threshold float64 `yaml:"threshold"`
+	Compare   string  `yaml:"compare"`
+	Cpu       string  `yaml:"cpu"`
+	Timeout   string  `yaml:"timeout"`
+	Benchmem  *bool   `yaml:"benchmem,omitempty"`
 }
 
 type Benchmark struct {
 	Name                   string `yaml:"name"`
 	Package                string `yaml:"package"`
 	UniqueName             string `yaml:"uniqueName"`
+	VersionRequirement     string `yaml:"versionRequirement"`
 	BenchmarkConfiguration `yaml:",inline"`
 }
 
