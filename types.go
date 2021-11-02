@@ -13,6 +13,7 @@ type Benchmark struct {
 	Name                   string `yaml:"name"`
 	Package                string `yaml:"package"`
 	UniqueName             string `yaml:"uniqueName"`
+	VersionRequirement     string `yaml:"versionRequirement"`
 	BenchmarkConfiguration `yaml:",inline"`
 }
 

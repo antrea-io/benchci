@@ -15,7 +15,7 @@ bin:
 .PHONY: test
 test:
 	@echo "==> Running all tests <=="
-	GOOS=linux $(GO) test ./test
+	GOOS=linux $(GO) test ./... -v
 
 # code linting
 .golangci-bin:

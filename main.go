@@ -8,14 +8,21 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
+	"github.com/blang/semver/v4"
 	"github.com/olekukonko/tablewriter"
 	"golang.org/x/tools/benchmark/parse"
 	"gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing"
+	"gopkg.in/src-d/go-git.v4/plumbing/storer"
 	"gopkg.in/yaml.v2"
 	"k8s.io/klog/v2"
+)
+
+const (
+	tagVersionPrefix = "v"
 )
 
 type result struct {
@@ -30,11 +37,12 @@ type comparedScore struct {
 }
 
 var (
-	flagConfiguration = &BenchmarkConfiguration{}
-	configPath        string
-	benchmarks        = &BenchmarkList{}
-	baseRef           string
-	onlyRegression    bool
+	flagConfiguration    = &BenchmarkConfiguration{}
+	configPath           string
+	benchmarks           = &BenchmarkList{}
+	baseRef              string
+	onlyRegression       bool
+	compareLatestVersion bool
 )
 
 type Set map[string]*parse.Benchmark
@@ -49,14 +57,13 @@ func init() {
 	flag.BoolVar(flagConfiguration.Benchmem, "benchmem", true, "")
 	flag.StringVar(&configPath, "config", "", "")
 	flag.StringVar(&baseRef, "base", "HEAD~1", "")
+	flag.BoolVar(&compareLatestVersion, "compare-release", true, "compare with latest release version")
 	flag.BoolVar(&onlyRegression, "only-regression", false, "")
 }
 
 func main() {
 	flag.Parse()
-
-	err := run()
-	if err != nil {
+	if err := run(); err != nil {
 		klog.Fatal(err)
 	}
 }
@@ -101,31 +108,92 @@ func updateBenchmarks() {
 	}
 }
 
-func runBenchmarks() (Set, error) {
+func versionRequired(required, tag string) bool {
+	if required == "" {
+		return true
+	}
+	required = strings.TrimSpace(required)
+	tagVer, _ := semver.Make(trimTagVersion(tag))
+
+	if strings.HasPrefix(required, ">=") {
+		requiredVer, _ := semver.Make(trimTagVersion(strings.TrimLeft(required, ">=")))
+		return tagVer.GTE(requiredVer)
+	}
+	if strings.HasPrefix(required, ">") {
+		requiredVer, _ := semver.Make(trimTagVersion(strings.TrimLeft(required, ">")))
+		return tagVer.GT(requiredVer)
+	}
+	requiredVer, _ := semver.Make(trimTagVersion(required))
+	return tagVer.Equals(requiredVer)
+}
+
+func runBenchmarks(tagVersion string) (Set, error) {
 	set := Set{}
 	for i, benchmark := range benchmarks.Benchmarks {
-		parseSet, err := runBenchmark(benchmarks.Command, &benchmarks.Benchmarks[i])
-		klog.InfoS("Parse result", "parseSet", parseSet)
-		if err != nil {
-			return nil, err
+		if tagVersion != "" && !versionRequired(benchmark.VersionRequirement, tagVersion) {
+			klog.InfoS("Version required, skip test", "tagVersion", tagVersion, "versionRequirement", benchmark.VersionRequirement)
+			continue
 		}
-		if len(parseSet) == 0 {
+		parseSet, err := runBenchmark(benchmarks.Command, &benchmarks.Benchmarks[i])
+		if err != nil {
+			klog.InfoS("Parse result error", "parseSet", parseSet)
 			continue
 		}
 		if len(parseSet) != 1 {
-			return nil, fmt.Errorf("expected exactly one benchmark result")
+			klog.InfoS("expected exactly one benchmark result", "got", parseSet)
+			continue
 		}
 		if _, ok := set[benchmark.UniqueName]; ok {
-			return nil, fmt.Errorf("more than one benchmark with unique name '%s'", benchmark.UniqueName)
+			klog.InfoS("more than one benchmark with unique name", "Name", benchmark.UniqueName)
+			continue
 		}
-		for _, s := range parseSet {
+		for name, s := range parseSet {
 			if len(s) != 1 {
-				return nil, fmt.Errorf("expected exactly one benchmark result")
+				klog.InfoS("expected exactly one benchmark result", "Name", name, "benchmark.UniqueName", benchmark.UniqueName)
+				continue
 			}
 			set[benchmark.UniqueName] = s[0]
 		}
 	}
 	return set, nil
+}
+
+func trimTagVersion(tagName string) string {
+	return strings.TrimLeft(tagName, tagVersionPrefix)
+}
+
+func getLatestRelease(repository *git.Repository) (prevVersionTag *plumbing.Reference, err error) {
+	var tagRefs storer.ReferenceIter
+	tagRefs, err = repository.Tags()
+	if err != nil {
+		return
+	}
+
+	type SemverTag struct {
+		Ref     *plumbing.Reference
+		Version semver.Version
+	}
+	tags := make([]SemverTag, 0)
+	err = tagRefs.ForEach(func(tagRef *plumbing.Reference) error {
+		tagName := tagRef.Name().Short()
+		v, err := semver.Make(trimTagVersion(tagName))
+		if err != nil {
+			klog.InfoS("Tag name is a not a valid semver, skipping", "tag", tagName, "err", err)
+		}
+		tags = append(tags, SemverTag{tagRef, v})
+		return nil
+	})
+	sort.Slice(tags, func(i, j int) bool {
+		t1 := &tags[i]
+		t2 := &tags[j]
+		return t1.Version.GT(t2.Version)
+	})
+	if len(tags) == 0 {
+		return prevVersionTag, fmt.Errorf("version tags not found in repository")
+	}
+	prevVersionTag = tags[0].Ref
+	klog.InfoS("Latest tag version", "tag", prevVersionTag)
+	return
 }
 
 func run() error {
@@ -162,36 +230,60 @@ func run() error {
 		return fmt.Errorf("the repository is dirty: commit all changes before running")
 	}
 
-	err = w.Reset(&git.ResetOptions{Commit: *prev, Mode: git.HardReset})
-	if err != nil {
-		return fmt.Errorf("failed to reset the worktree to a previous commit: %w", err)
+	resetAndRunBenchmark := func(commit plumbing.Hash, ref string, isTag bool) (benchSet Set, err error) {
+		err = w.Reset(&git.ResetOptions{Commit: commit, Mode: git.HardReset})
+		if err != nil {
+			return nil, fmt.Errorf("failed to reset the worktree to a commit %v, ref %v: %w", commit, ref, err)
+		}
+
+		klog.InfoS("Run Benchmark", "commitHash", commit, "Ref", ref)
+		var tagVersion string
+		if isTag {
+			tagVersion = ref
+		}
+		benchSet, err = runBenchmarks(tagVersion)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run a benchmark: %w", err)
+		}
+		return
 	}
 
 	defer func() {
 		_ = w.Reset(&git.ResetOptions{Commit: head.Hash(), Mode: git.HardReset})
 	}()
-
 	updateBenchmarks()
 
-	klog.InfoS("Run Benchmark", "prev", prev, "baseRef", baseRef)
-	prevSet, err := runBenchmarks()
+	// run benchmark of baseRef
+	prevSet, err := resetAndRunBenchmark(*prev, baseRef, false)
 	if err != nil {
-		return fmt.Errorf("failed to run a benchmark: %w", err)
+		return err
 	}
 
-	err = w.Reset(&git.ResetOptions{Commit: head.Hash(), Mode: git.HardReset})
-	if err != nil {
-		return fmt.Errorf("failed to reset the worktree to HEAD: %w", err)
+	// run benchmark of latestReleaseVersion
+	var latestReleaseSet Set
+	var tagName string
+	var prevVersionTag *plumbing.Reference
+	if compareLatestVersion {
+		prevVersionTag, err = getLatestRelease(r)
+		if err != nil {
+			return fmt.Errorf("failed to get latest release version: %w", err)
+		}
+		tagName = prevVersionTag.Name().String()
+		latestReleaseSet, err = resetAndRunBenchmark(prevVersionTag.Hash(), prevVersionTag.Name().Short(), true)
+		if err != nil {
+			return err
+		}
 	}
 
-	klog.InfoS("Run Benchmark", "head.Hash", head.Hash(), "head", "HEAD")
-	headSet, err := runBenchmarks()
+	// run benchmark of HEAD
+	headSet, err := resetAndRunBenchmark(head.Hash(), "HEAD", false)
 	if err != nil {
-		return fmt.Errorf("failed to run a benchmark: %w", err)
+		return err
 	}
 
 	var ratios []result
 	var rows [][]string
+	var ratiosWithRelease []result
 
 	for _, benchmark := range benchmarks.Benchmarks {
 		benchName := benchmark.UniqueName
@@ -209,32 +301,54 @@ func run() error {
 			continue
 		}
 
+		getRationsPerOP := func(headBench, baseBench *parse.Benchmark) (ratioNsPerOp float64) {
+			if prevBench.NsPerOp != 0 {
+				ratioNsPerOp = (headBench.NsPerOp - baseBench.NsPerOp) / baseBench.NsPerOp
+			}
+			return
+		}
+
+		getRatioAllocedBytesPerOp := func(headBench, baseBench *parse.Benchmark) (ratioAllocedBytesPerOp float64) {
+			if prevBench.AllocedBytesPerOp != 0 {
+				ratioAllocedBytesPerOp = (float64(headBench.AllocedBytesPerOp) - float64(baseBench.AllocedBytesPerOp)) / float64(baseBench.AllocedBytesPerOp)
+			}
+			return
+		}
+
 		rows = append(rows, generateRow(baseRef, prevBench))
-
-		var ratioNsPerOp float64
-		if prevBench.NsPerOp != 0 {
-			ratioNsPerOp = (headBench.NsPerOp - prevBench.NsPerOp) / prevBench.NsPerOp
-		}
-
-		var ratioAllocedBytesPerOp float64
-		if prevBench.AllocedBytesPerOp != 0 {
-			ratioAllocedBytesPerOp = (float64(headBench.AllocedBytesPerOp) - float64(prevBench.AllocedBytesPerOp)) / float64(prevBench.AllocedBytesPerOp)
-		}
-
 		ratios = append(ratios, result{
 			Benchmark:              benchmark,
-			RatioNsPerOp:           ratioNsPerOp,
-			RatioAllocedBytesPerOp: ratioAllocedBytesPerOp,
+			RatioNsPerOp:           getRationsPerOP(headBench, prevBench),
+			RatioAllocedBytesPerOp: getRatioAllocedBytesPerOp(headBench, prevBench),
 		})
+
+		// get benchmark result of latestReleaseVersion
+		if latestReleaseSet == nil {
+			continue
+		}
+		if latestReleaseBench, ok := latestReleaseSet[benchName]; ok {
+			rows = append(rows, generateRow(tagName, latestReleaseBench))
+			ratiosWithRelease = append(ratiosWithRelease, result{
+				Benchmark:              benchmark,
+				RatioNsPerOp:           getRationsPerOP(headBench, latestReleaseBench),
+				RatioAllocedBytesPerOp: getRatioAllocedBytesPerOp(headBench, latestReleaseBench),
+			})
+		}
 	}
 
 	if !onlyRegression {
 		showResult(os.Stdout, rows)
 	}
 
-	regression := showRatio(os.Stdout, ratios, onlyRegression)
-	if regression {
-		return fmt.Errorf("This commit makes benchmarks worse")
+	regression := showRatio(os.Stdout, ratios, onlyRegression, baseRef)
+
+	var regressionWithLatestVersion bool
+	if latestReleaseSet != nil {
+		regressionWithLatestVersion = showRatio(os.Stdout, ratiosWithRelease, onlyRegression, tagName)
+	}
+	if regression || regressionWithLatestVersion {
+		return fmt.Errorf("this commit makes benchmarks worse，compared with %s: %t, compared with %s: %t",
+			baseRef, regression, tagName, regressionWithLatestVersion)
 	}
 
 	return nil
@@ -258,6 +372,7 @@ func runBenchmark(cmdStr string, benchmark *Benchmark) (parse.Set, error) {
 	cmd := exec.Command(cmdStr, args...)
 	cmd.Stderr = &stderr
 
+	klog.InfoS("Running benchmark", "command", cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		if strings.HasSuffix(strings.TrimSpace(stderr.String()), "no packages to test") {
@@ -273,7 +388,6 @@ func runBenchmark(cmdStr string, benchmark *Benchmark) (parse.Set, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse a result of benchmarks: %w", err)
 	}
-	klog.InfoS("Run benchmark", "command", cmd)
 	return s, nil
 }
 
@@ -297,7 +411,7 @@ func showResult(w io.Writer, rows [][]string) {
 	table.Render()
 }
 
-func showRatio(w io.Writer, results []result, onlyRegression bool) bool {
+func showRatio(w io.Writer, results []result, onlyRegression bool, compareWith string) bool {
 	table := tablewriter.NewWriter(w)
 	table.SetAutoFormatHeaders(false)
 	table.SetAlignment(tablewriter.ALIGN_CENTER)
@@ -330,7 +444,7 @@ func showRatio(w io.Writer, results []result, onlyRegression bool) bool {
 		table.Rich(row, colors)
 	}
 	if table.NumLines() > 0 {
-		fmt.Fprintln(w, "\nComparison")
+		fmt.Fprintln(w, fmt.Sprintf("\nComparison with %s", compareWith))
 		fmt.Fprintf(w, "%s\n\n", strings.Repeat("=", 10))
 
 		table.Render()
